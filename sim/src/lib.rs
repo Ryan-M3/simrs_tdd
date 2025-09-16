@@ -2,15 +2,28 @@ pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }
 
+pub mod app {
+    use bevy::prelude::App;
+
+    /// Construct the main simulation app with minimal resources installed.
+    pub fn main_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(crate::time::GameSpeed::default());
+        app.insert_resource(crate::rng::Rng::default());
+        app
+    }
+}
+
 pub mod graph {
     use std::collections::HashMap;
 
     #[derive(Clone, Debug, Default)]
-    pub struct Graph {
+    pub struct Graph<T> {
         degrees: HashMap<usize, usize>,
-        weights: HashMap<(usize, usize), usize>,
+        weights: HashMap<(usize, usize), T>,
     }
-    impl Graph {
+
+    impl<T> Graph<T> {
         pub fn new() -> Self {
             Graph {
                 degrees: HashMap::new(),
@@ -18,10 +31,13 @@ pub mod graph {
             }
         }
 
-        pub fn add_edge(&mut self, a: usize, b: usize, weight: usize) {
+        pub fn add_edge(&mut self, a: usize, b: usize, weight: T)
+        where
+            T: Clone,
+        {
             *self.degrees.entry(a).or_insert(0) += 1;
             *self.degrees.entry(b).or_insert(0) += 1;
-            self.weights.insert((a, b), weight);
+            self.weights.insert((a, b), weight.clone());
             self.weights.insert((b, a), weight);
         }
 
@@ -29,8 +45,8 @@ pub mod graph {
             self.degrees.get(&v).copied().unwrap_or(0)
         }
 
-        pub fn weight(&self, a: usize, b: usize) -> Option<usize> {
-            self.weights.get(&(a, b)).copied()
+        pub fn weight(&self, a: usize, b: usize) -> Option<&T> {
+            self.weights.get(&(a, b))
         }
     }
 }
@@ -51,12 +67,12 @@ pub mod game_event {
         fn sample(&mut self, _dt: Duration, _rate: f64) -> u64;
     }
 
-    pub struct Proximity {
-        graph: crate::graph::Graph,
+    pub struct Proximity<T> {
+        graph: crate::graph::Graph<T>,
         pair: Option<(usize, usize)>,
     }
-    impl Proximity {
-        pub fn new(graph: crate::graph::Graph) -> Self {
+    impl<T> Proximity<T> {
+        pub fn new(graph: crate::graph::Graph<T>) -> Self {
             Proximity { graph, pair: None }
         }
         pub fn with_pair(mut self, a: usize, b: usize) -> Self {
@@ -64,7 +80,7 @@ pub mod game_event {
             self
         }
     }
-    impl Trigger for Proximity {
+    impl<T> Trigger for Proximity<T> {
         fn should_fire(&mut self) -> bool {
             if let Some((a, b)) = self.pair {
                 self.graph.weight(a, b).is_some()
@@ -75,8 +91,8 @@ pub mod game_event {
     }
 
     pub struct GameEventSys {
-        trigger: Option<Box<dyn Trigger>>,
-        resolver: Option<Box<dyn Resolver>>,
+        triggers: Vec<Box<dyn Trigger>>,
+        resolvers: Vec<Box<dyn Resolver>>,
         freq: Option<Duration>,
         elapsed: Duration,
         poisson_rate: Option<f64>,
@@ -86,8 +102,8 @@ pub mod game_event {
     impl GameEventSys {
         pub fn new() -> Self {
             GameEventSys {
-                trigger: None,
-                resolver: None,
+                triggers: Vec::new(),
+                resolvers: Vec::new(),
                 freq: None,
                 elapsed: Duration::from_secs(0),
                 poisson_rate: None,
@@ -96,7 +112,7 @@ pub mod game_event {
         }
 
         pub fn with_trigger<T: Trigger + 'static>(mut self, trigger: T) -> Self {
-            self.trigger = Some(Box::new(trigger));
+            self.triggers.push(Box::new(trigger));
             self
         }
 
@@ -106,7 +122,7 @@ pub mod game_event {
         }
 
         pub fn with_resolver<R: Resolver + 'static>(mut self, resolver: R) -> Self {
-            self.resolver = Some(Box::new(resolver));
+            self.resolvers.push(Box::new(resolver));
             self
         }
 
@@ -121,14 +137,18 @@ pub mod game_event {
         }
 
         pub fn run_once(&mut self) -> bool {
-            if let (Some(trigger), Some(resolver)) = (self.trigger.as_mut(), self.resolver.as_mut())
-            {
-                if trigger.should_fire() {
-                    resolver.resolve();
-                    return true;
-                }
+            if self.triggers.is_empty() || self.resolvers.is_empty() {
+                return false;
             }
-            false
+
+            if self.triggers.iter_mut().all(|trigger| trigger.should_fire()) {
+                for resolver in self.resolvers.iter_mut() {
+                    resolver.resolve();
+                }
+                true
+            } else {
+                false
+            }
         }
 
         pub fn tick(&mut self, dt: Duration) -> bool {
@@ -159,13 +179,40 @@ pub mod game_event {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod time {
+    use bevy::prelude::Resource;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    #[derive(Resource, Clone, Copy, Debug, PartialEq)]
+    pub struct GameSpeed(pub f32);
+
+    impl Default for GameSpeed {
+        fn default() -> Self {
+            GameSpeed(1.0)
+        }
+    }
+}
+
+pub mod rng {
+    use bevy::prelude::Resource;
+
+    #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Rng {
+        state: u64,
+    }
+
+    impl Rng {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn next_u64(&mut self) -> u64 {
+            // Xorshift64* for a tiny, deterministic RNG
+            let mut x = self.state.wrapping_add(0x9E3779B97F4A7C15);
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.state = x;
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        }
     }
 }
